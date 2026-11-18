@@ -3,8 +3,9 @@
     "name": "Benchless AI",
     "slug": "benchless-ai",
     "scheme": "benchlessai",
-    "userInterfaceStyle": "dark",
-    "plugins": ["expo-router"],
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#0C1110",
+    "plugins": ["expo-router", "expo-notifications"],
     "experiments": {
       "typedRoutes": true
     }

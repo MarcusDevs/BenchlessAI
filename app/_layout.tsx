@@ -1,11 +1,11 @@
 import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { View } from 'react-native';
+import { benchlessColors } from '../src/design/tokens';
+import { useColorScheme, View } from 'react-native';
 
 export default function RootLayout() {
+  const isDark = useColorScheme() === 'dark';
   return (
-    <View style={{ flex: 1, backgroundColor: '#0b1422' }}>
-      <StatusBar style="dark" />
+    <View style={{ flex: 1, backgroundColor: isDark ? benchlessColors.dark.background : benchlessColors.light.background }}>
       <Stack screenOptions={{ headerShown: false }} />
     </View>
   );
