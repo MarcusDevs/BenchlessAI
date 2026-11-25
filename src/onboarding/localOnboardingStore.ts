@@ -9,6 +9,7 @@ export type SavedOnboarding<T> = {
   version: 1;
   answers: T;
   completedAt: string | null;
+  currentStep: number;
 };
 
 export async function loadOnboarding<T>(): Promise<SavedOnboarding<T> | null> {
@@ -22,7 +23,12 @@ export async function loadOnboarding<T>(): Promise<SavedOnboarding<T> | null> {
         if (legacy && typeof legacy === 'object') {
           const candidate = legacy as Partial<SavedOnboarding<T>>;
           if (candidate.version === 1 && candidate.answers && typeof candidate.answers === 'object') {
-            record = { version: 1, answers: candidate.answers, completedAt: typeof candidate.completedAt === 'string' ? candidate.completedAt : null };
+            record = {
+              version: 1,
+              answers: candidate.answers,
+              completedAt: typeof candidate.completedAt === 'string' ? candidate.completedAt : null,
+              currentStep: typeof candidate.currentStep === 'number' ? candidate.currentStep : 0,
+            };
             await onboardingRepository.save(record);
           }
         }
@@ -32,11 +38,16 @@ export async function loadOnboarding<T>(): Promise<SavedOnboarding<T> | null> {
     }
   }
   if (!record || !record.answers || typeof record.answers !== 'object') return null;
-  return { version: 1, answers: record.answers as T, completedAt: typeof record.completedAt === 'string' ? record.completedAt : null };
+  return {
+    version: 1,
+    answers: record.answers as T,
+    completedAt: typeof record.completedAt === 'string' ? record.completedAt : null,
+    currentStep: Number.isInteger(record.currentStep) && record.currentStep >= 0 ? record.currentStep : 0,
+  };
 }
 
-export async function saveOnboarding<T>(answers: T, completedAt: string | null): Promise<void> {
-  const record: SavedOnboarding<T> = { version: 1, answers, completedAt };
+export async function saveOnboarding<T>(answers: T, completedAt: string | null, currentStep = 0): Promise<void> {
+  const record: SavedOnboarding<T> = { version: 1, answers, completedAt, currentStep };
   await onboardingRepository.save(record);
 }
 

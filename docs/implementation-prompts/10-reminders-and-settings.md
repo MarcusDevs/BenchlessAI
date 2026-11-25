@@ -8,6 +8,7 @@ Implement training and check-in preferences using the settings/reminder requirem
 - If permission is denied, keep reminders visibly off and explain how to change permission later. “Not now” remains available.
 - Keep units, rest timer, training goal/level/equipment, and settings linked to the canonical profile rather than duplicating values.
 - Schedule, update, and cancel local notifications consistently when preferences change.
+- Persist user preferences and timezone to the authenticated profile; when server push delivery is connected, honor opt-in, quiet hours, timezone changes, and trial dates. Local scheduling alone must not be described as server delivery.
 
 ## Acceptance
 

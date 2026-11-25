@@ -55,10 +55,12 @@ export type PhaseProgress = {
 
 export type UserId = string;
 export type RecordId = string;
+export type AccountIdentity = { userId: UserId; fullName: string | null };
 
 export type ProfileRecord = {
   userId: UserId;
   onboarding: OnboardingProfile;
+  completedAt: string | null;
   updatedAt: string;
 };
 
@@ -107,3 +109,14 @@ export type NotificationPreferences = {
 };
 
 export type ExportRequest = { requestedAt: string; status: 'queued' | 'ready' | 'failed' };
+
+export type WorkoutHistoryEntry = {
+  id: string;
+  date: string;
+  title: string;
+  minutes: number;
+  sets: number;
+  pain?: number;
+  feel?: SessionCheckIn['feel'];
+  exercises: { name: string; detail: string }[];
+};

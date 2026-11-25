@@ -1,24 +1,28 @@
 import type {
-  CheckInRecord, EntitlementRecord, ExportRequest, NotificationPreferences, OnboardingProfile,
+  AccountIdentity, CheckInRecord, EntitlementRecord, ExportRequest, NotificationPreferences, OnboardingProfile,
   PlanRecord, ProfileRecord, ProgressSnapshot, UserId, WorkoutLog,
 } from '../domain/models';
 
 export type DataSource = 'local-preview' | 'remote';
 export type ServiceResult<T> = { ok: true; value: T; source: DataSource } | {
   ok: false;
-  error: { code: 'offline' | 'unavailable' | 'unauthorized' | 'not-found' | 'invalid' | 'unknown'; message: string; recoverable: boolean };
+  error: { code: 'offline' | 'unavailable' | 'unauthorized' | 'email-unconfirmed' | 'not-found' | 'invalid' | 'unknown'; message: string; recoverable: boolean; debugDetails?: string };
 };
 
 export interface AuthService {
-  signIn(email: string, password: string): Promise<ServiceResult<{ userId: UserId }>>;
+  signIn(email: string, password: string): Promise<ServiceResult<AccountIdentity>>;
+  signUp(fullName: string, email: string, password: string, birthYear: string): Promise<ServiceResult<AccountIdentity & { verificationRequired: boolean }>>;
+  signInWithGoogle(birthYear: string): Promise<ServiceResult<AccountIdentity>>;
+  verifyEmail(email: string, token: string): Promise<ServiceResult<AccountIdentity>>;
   signOut(): Promise<ServiceResult<void>>;
   requestPasswordReset(email: string): Promise<ServiceResult<void>>;
-  currentUser(): Promise<ServiceResult<{ userId: UserId } | null>>;
+  resendVerification(email: string): Promise<ServiceResult<void>>;
+  currentUser(): Promise<ServiceResult<AccountIdentity | null>>;
 }
 
 export interface ProfileService {
   get(userId: UserId): Promise<ServiceResult<ProfileRecord | null>>;
-  save(userId: UserId, profile: OnboardingProfile): Promise<ServiceResult<ProfileRecord>>;
+  save(userId: UserId, profile: OnboardingProfile, completedAt: string | null): Promise<ServiceResult<ProfileRecord>>;
 }
 
 export interface PlanService {

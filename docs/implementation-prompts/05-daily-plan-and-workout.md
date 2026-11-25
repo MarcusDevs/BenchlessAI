@@ -8,7 +8,8 @@ Implement the core daily training loop from the frontend FRD and `Benchless scre
 - Show final plan changes and reasons. Rules—not AI—own keep/modify/swap/unavailable decisions. Make each changed exercise understandable and reversible when allowed.
 - Log sets, reps, load or duration, rest, notes, previous values, and PR feedback. Persist workout progress locally before any remote sync.
 - Include controllable exercise demo media, set progress, rest controls, finish/pause recovery, and a clearly discoverable “Something hurts?” action. A hurting response pauses the current movement/session and offers safe adaptation/stop actions.
-- Keep guest/offline training usable from cached data. Clearly show pending or failed sync.
+- Keep authenticated-user offline training usable from that user's cached plan and logs. Do not unlock training for a signed-out guest. Clearly show pending or failed sync and reconcile queued writes without duplicating sessions.
+- Load the signed-in user's saved goal, experience, equipment, training days, injury state, and reviewed rules version. Keep user data and cached plan ownership scoped to that account.
 
 ## Acceptance
 

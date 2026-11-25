@@ -4,16 +4,24 @@ import {
   StyleSheet, Text, TextInput, useColorScheme, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppStateView } from '../src/components/system/AppStateView';
 import DailyTrainingLoop from '../src/training/DailyTrainingLoop';
-import { benchlessColors, designTokens } from '../src/design/tokens';
+import { benchlessColors, designTokens, type ColorScheme } from '../src/design/tokens';
+import { AppearancePicker, type AppearancePreference } from '../src/design/AppearancePicker';
 import {
   bodyMapMarkers, equipmentOptions, experienceLevels, goals, lowerBackRedFlagQuestions,
   redFlagQuestions, sectionLabels, weekDays,
   type BodyArea, type InjuryStatus, type Side,
 } from '../src/onboarding/content';
-import { loadOnboarding, saveOnboarding } from '../src/onboarding/localOnboardingStore';
+import { clearOnboarding, loadOnboarding, saveOnboarding } from '../src/onboarding/localOnboardingStore';
 import { hasScheduledWorkoutReminders, syncWorkoutReminders } from '../src/onboarding/reminders';
-import type { OnboardingProfile } from '../src/domain/models';
+import type { AccountIdentity, OnboardingProfile } from '../src/domain/models';
+import { isAdultBirthYear } from '../src/features/auth/age';
+import { useAuth } from '../src/features/auth/AuthProvider';
+import { AccountAccessScreen } from '../src/features/auth/AccountAccessScreen';
+import { identityFromSupabaseUser, supabaseAuthAdapter } from '../src/features/auth/supabaseAuthAdapter';
+import { supabaseProfileService } from '../src/features/profile/supabaseProfileService';
 
 type ThemeColors = {
   background: string; surface: string; surfaceRaised: string; surfaceSelected: string;
@@ -50,16 +58,17 @@ const palettes: Record<'dark' | 'light', ThemeColors> = {
   },
 };
 
-type Screen = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16;
+type Screen = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
 type Equipment = OnboardingProfile['equipment'][number];
 type Face = OnboardingProfile['face'];
 type OnboardingData = OnboardingProfile;
+const APPEARANCE_STORAGE_KEY = 'benchless.appearance.v1';
 
 const initialData: OnboardingData = {
   goal: 'Build muscle', experience: 'Intermediate', equipment: ['Dumbbells at home'], cardio: false,
   days: [0, 1, 3, 4], injuryStatus: 'I’m managing an injury', area: 'Knee', side: 'Left', areas: [{ area: 'Knee', side: 'Left' }], face: 'front',
   pain: 2, onset: 'This week', cause: '', redFlags: Array(redFlagQuestions.length + lowerBackRedFlagQuestions.length).fill(false),
-  birthYear: '1998', acknowledged: false, membership: 'Annual', trainingTime: '18:00',
+  birthYear: '', acknowledged: false, membership: 'Annual', trainingTime: '18:00',
   workoutReminders: true, sessionCheckIns: true,
 };
 
@@ -72,7 +81,6 @@ function progressFor(screen: Screen) {
   if (screen === 11) return 8;
   if (screen === 12) return 9;
   if (screen === 13) return 10;
-  if (screen === 16) return 10;
   return 10;
 }
 
@@ -145,14 +153,21 @@ function HeroArtwork({ styles }: { styles: AppStyles }) {
 }
 
 export default function OnboardingScreen() {
+  const { status: authStatus, session, profile: serverProfile, profileError, refreshProfile } = useAuth();
   const [screen, setScreen] = useState<Screen>(0);
   const [showTraining, setShowTraining] = useState(false);
   const [data, setData] = useState<OnboardingData>(initialData);
   const [completedAt, setCompletedAt] = useState<string | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
+  const [account, setAccount] = useState<AccountIdentity | null>(null);
+  const [savingAccountSetup, setSavingAccountSetup] = useState(false);
+  const [accountSetupError, setAccountSetupError] = useState('');
   const [remindersActive, setRemindersActive] = useState(false);
+  const [draftSaveError, setDraftSaveError] = useState('');
   const systemScheme = useColorScheme();
-  const themeMode = systemScheme === 'light' ? 'light' : 'dark';
+  const [appearancePreference, setAppearancePreference] = useState<AppearancePreference>('system');
+  const appearanceChanged = useRef(false);
+  const themeMode: ColorScheme = appearancePreference === 'system' ? (systemScheme === 'light' ? 'light' : 'dark') : appearancePreference;
   const colors = palettes[themeMode];
   const styles = useMemo(() => createStyles(colors), [colors]);
   const fade = useRef(new Animated.Value(1)).current;
@@ -161,23 +176,66 @@ export default function OnboardingScreen() {
 
   useEffect(() => {
     let active = true;
+    void AsyncStorage.getItem(APPEARANCE_STORAGE_KEY).then((saved) => {
+      if (active && !appearanceChanged.current && (saved === 'system' || saved === 'light' || saved === 'dark')) setAppearancePreference(saved);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  function changeAppearance(value: AppearancePreference) {
+    appearanceChanged.current = true;
+    setAppearancePreference(value);
+    void AsyncStorage.setItem(APPEARANCE_STORAGE_KEY, value).catch(() => undefined);
+  }
+
+  useEffect(() => {
+    let active = true;
     loadOnboarding<OnboardingData>().then((saved) => {
       if (!active) return;
       if (saved) {
         setData({ ...initialData, ...saved.answers });
-        setCompletedAt(saved.completedAt);
-        if (saved.completedAt) setShowTraining(true);
+        setCompletedAt(null);
+      }
+      if (authStatus === 'signedIn' && session) {
+        const identity = identityFromSupabaseUser(session.user);
+        setAccount(identity);
+        if (profileError) {
+          setShowTraining(false);
+        } else if (serverProfile?.completedAt && serverProfile.onboarding) {
+          setData({ ...initialData, ...serverProfile.onboarding });
+          setCompletedAt(serverProfile.completedAt);
+          setShowTraining(true);
+        } else if (serverProfile?.onboarding) {
+          setData({ ...initialData, ...serverProfile.onboarding });
+          setCompletedAt(null);
+          setShowTraining(false);
+          go(10);
+        } else if (saved && saved.currentStep > 0) {
+          setCompletedAt(null);
+          setShowTraining(false);
+          go(saved.currentStep === 14 ? 12 : Math.min(saved.currentStep, 14) as Screen);
+        } else {
+          setCompletedAt(null);
+          setShowTraining(false);
+          go(0);
+        }
+      } else {
+        setAccount(null);
+        setShowTraining(false);
+        setCompletedAt(null);
+        if (saved && saved.currentStep > 0) go(Math.min(saved.currentStep, 14) as Screen);
+        else go(0);
       }
     }).catch(() => undefined).finally(() => { if (active) setIsHydrated(true); });
     hasScheduledWorkoutReminders().then((isActive) => { if (active) setRemindersActive(isActive); }).catch(() => undefined);
     return () => { active = false; };
-  }, []);
+  }, [authStatus, session, serverProfile, profileError]);
 
   useEffect(() => {
-    if (isHydrated) void saveOnboarding(data, completedAt).catch(() => undefined);
-  }, [data, completedAt, isHydrated]);
+    if (isHydrated) void saveOnboarding(data, completedAt, screen).catch(() => undefined);
+  }, [data, completedAt, screen, isHydrated]);
   // A year-only picker cannot confirm a birthday, so use a conservative Jan 1 cutoff.
-  const isAdult = Boolean(Number(data.birthYear)) && Number(data.birthYear) <= new Date().getFullYear() - 19;
+  const isAdult = isAdultBirthYear(data.birthYear);
   const questions = useMemo(() => [...redFlagQuestions, ...(data.area === 'Lower back' ? lowerBackRedFlagQuestions : [])], [data.area]);
   const hasRedFlag = data.redFlags.slice(0, questions.length).some(Boolean);
   const activeDays = weekDays.filter((_, index) => data.days.includes(index));
@@ -193,6 +251,7 @@ export default function OnboardingScreen() {
   }, [screen, fade, translate]);
 
   function update<K extends keyof OnboardingData>(key: K, value: OnboardingData[K]) {
+    setDraftSaveError('');
     setData((previous) => ({ ...previous, [key]: value }));
   }
   function go(next: Screen) { setScreen(next); }
@@ -208,6 +267,18 @@ export default function OnboardingScreen() {
     const redFlags = [...data.redFlags];
     redFlags[index] = !redFlags[index];
     update('redFlags', redFlags);
+  }
+  async function signOut() {
+    const result = await supabaseAuthAdapter.signOut();
+    if (result.ok && result.source === 'remote') {
+      await clearOnboarding().catch(() => undefined);
+      setData(initialData);
+      setCompletedAt(null);
+      setAccount(null);
+      setShowTraining(false);
+      setScreen(0);
+    }
+    else if (!result.ok) Alert.alert('Couldn’t sign out', result.error.message);
   }
   function toggleBodyArea(area: BodyArea, side: Side) {
     if (!supportedBodyAreas.includes(area)) return;
@@ -227,7 +298,7 @@ export default function OnboardingScreen() {
     update('area', area);
     update('side', nextSide);
   }
-  function next() {
+  async function next() {
     switch (screen) {
       case 0: go(1); break;
       case 1: go(2); break;
@@ -243,11 +314,46 @@ export default function OnboardingScreen() {
         go(7); break;
       case 7: go(8); break;
       case 8: if (hasRedFlag) go(15); else go(9); break;
-      case 9: if (isAdult && data.acknowledged) go(10); break;
-      case 10: go(11); break;
+      case 9:
+        if (isAdult && data.acknowledged) {
+          try {
+            // Make the local draft durable before the person leaves onboarding for sign-in.
+            await saveOnboarding(data, completedAt, 10);
+            setDraftSaveError('');
+            go(10);
+          } catch {
+            setDraftSaveError('We couldn’t save your setup on this device yet. Try again before continuing to your account.');
+          }
+        }
+        break;
+      case 10:
+        if (!account) {
+          setShowTraining(true);
+          return;
+        }
+        if (savingAccountSetup) return;
+        setSavingAccountSetup(true);
+        setAccountSetupError('');
+        try {
+          const saved = await persistProfile(account, data);
+          if (!saved.ok) {
+            setAccountSetupError(`${saved.error.message} Your answers are still saved on this device.`);
+            return;
+          }
+          if (saved.source !== 'remote') {
+            setAccountSetupError('Account sync is not connected in this preview. Your answers are still saved on this device.');
+            return;
+          }
+          go(11);
+        } catch {
+          setAccountSetupError('The app could not complete the Supabase save. Try again. Your answers are still saved on this device.');
+        } finally {
+          setSavingAccountSetup(false);
+        }
+        break;
       case 11: go(12); break;
       case 12: go(13); break;
-      case 13: go(16); break;
+      case 13: go(14); break;
       case 14:
         setData(initialData);
         setCompletedAt(null);
@@ -255,14 +361,13 @@ export default function OnboardingScreen() {
         go(0);
         break;
       case 15: go(5); break;
-      case 16: go(14); break;
     }
   }
   function previous() {
     if (screen === 15) { go(8); return; }
     const previousScreen: Partial<Record<Screen, Screen>> = {
       1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: isInjury ? 8 : 5,
-      10: 9, 11: 10, 12: 11, 13: 12, 14: 16, 16: 13,
+      10: 9, 11: 10, 12: 11, 13: 12,
     };
     if (previousScreen[screen] !== undefined) go(previousScreen[screen]!);
   }
@@ -271,8 +376,41 @@ export default function OnboardingScreen() {
     update('trainingTime', `${String((hour + delta + 24) % 24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
   }
 
-  function openToday() {
+  async function persistProfile(identity: AccountIdentity, answers: OnboardingData) {
+    return supabaseProfileService.save(identity.userId, answers, completedAt);
+  }
+  async function continueFromAccount(identity: AccountIdentity) {
+    const existingProfile = await supabaseProfileService.get(identity.userId);
+    if (!existingProfile.ok || existingProfile.source !== 'remote') {
+      Alert.alert('Could not load your setup', 'Your account is confirmed, but we could not check its saved profile. Your local onboarding draft is safe; check your connection and try again.');
+      return;
+    }
+    if (existingProfile.value) {
+      setData({ ...initialData, ...existingProfile.value.onboarding });
+      setCompletedAt(existingProfile.value.completedAt);
+      setAccount(identity);
+      if (existingProfile.value.completedAt) setShowTraining(true);
+      else go(11);
+      return;
+    }
+    const saved = await persistProfile(identity, data);
+    if (!saved.ok || saved.source !== 'remote') {
+      const details = saved.ok ? 'Account sync is not connected in this preview.' : saved.error.message;
+      Alert.alert('Setup not synced yet', `${details} Your onboarding remains saved on this device.`);
+      return;
+    }
+    setAccount(identity);
+    go(11);
+  }
+  async function openToday() {
     const completed = completedAt ?? new Date().toISOString();
+    if (account) {
+      const result = await supabaseProfileService.save(account.userId, data, completed);
+      if (!result.ok || result.source !== 'remote') {
+        Alert.alert('Setup not synced yet', 'Your latest choices remain saved on this device. Check your connection and try again before opening training.');
+        return;
+      }
+    }
     setCompletedAt(completed);
     setShowTraining(true);
   }
@@ -297,7 +435,7 @@ export default function OnboardingScreen() {
     }
   }
   async function saveReminderPreferences() {
-    if (!data.workoutReminders) { setRemindersActive(false); go(16); return; }
+    if (!data.workoutReminders) { setRemindersActive(false); go(14); return; }
     try {
       const active = await syncWorkoutReminders(true, data.days, data.trainingTime);
       setRemindersActive(active);
@@ -305,12 +443,12 @@ export default function OnboardingScreen() {
         update('workoutReminders', false);
         Alert.alert('Reminders are off', 'Allow Benchless AI notifications in your device settings to turn on workout reminders.');
       }
-      go(16);
+      go(14);
     } catch {
       setRemindersActive(false);
       update('workoutReminders', false);
       Alert.alert('Could not update reminders', 'Your training plan is saved. You can change notification permission in your device settings.');
-      go(16);
+      go(14);
     }
   }
 
@@ -324,11 +462,11 @@ export default function OnboardingScreen() {
     7: { eyebrow: '05 / YOUR BODY', title: 'How does it feel?', body: 'A little context helps shape a careful starting point.' },
     8: { eyebrow: '05 / YOUR BODY', title: 'A quick safety check.', body: 'Tell us if any of these are happening right now.' },
     9: { eyebrow: '06 / YOUR BODY', title: 'A little context. A safer start.', body: 'Benchless AI is designed for adults aged 18 and over.' },
-    10: { eyebrow: '07 / YOUR ACCOUNT', title: 'Your progress belongs with you.', body: 'An account keeps your plan, preferences and check-ins together.' },
+    10: { eyebrow: '07 / YOUR ACCOUNT', title: 'Keep your setup with you.', body: 'Create an account or sign in to save your plan and preferences.' },
     11: { eyebrow: '08 / YOUR PLAN', title: 'Your first week, rethought.', body: `${activeDays.length} sessions shaped around the days you chose.` },
-    12: { eyebrow: '09 / YOUR MEMBERSHIP', title: 'Find your rhythm. Try 14 days free.', body: 'Full access to your adaptive plan, workout log and session check-ins.' },
+    12: { eyebrow: '09 / 14-DAY TRIAL', title: 'Try Benchless for 14 days.', body: 'No payment details are needed for this offer preview.' },
     13: { eyebrow: '10 / READY TO GO', title: 'A nudge, when you want it.', body: 'Choose a time that works for you. You can change this later.' },
-    16: { eyebrow: '10 / YOUR TRIAL', title: 'Your 14 days start now.', body: 'Full access to your adaptive plan, workout log and session check-ins.' },
+    14: { eyebrow: 'SETUP COMPLETE', title: 'You’re ready to move.', body: 'Your account and preferences are saved. Your training area is ready.' },
   };
   const page = headlines[screen];
 
@@ -343,17 +481,60 @@ export default function OnboardingScreen() {
     return <SafeAreaView style={styles.safe} edges={['top', 'bottom']}><StatusBar barStyle={themeMode === 'dark' ? 'light-content' : 'dark-content'} backgroundColor={colors.background} /><View style={styles.loadingState}><BrandMark styles={styles}/><Text style={styles.brandText}>BENCHLESS</Text></View></SafeAreaView>;
   }
 
+  if (authStatus === 'signedIn' && profileError) {
+    return <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <AppStateView
+        kind="offline"
+        title="Your saved setup isn’t available yet"
+        message={profileError}
+        appearance={themeMode}
+        actionLabel="Try again"
+        onAction={() => { void refreshProfile(); }}
+        secondaryActionLabel="Sign out"
+        onSecondaryAction={() => { void signOut(); }}
+      />
+    </SafeAreaView>;
+  }
+
   if (showTraining) {
+    if (!account) return <SafeAreaView style={styles.safe} edges={['top', 'bottom']}><StatusBar barStyle={themeMode === 'dark' ? 'light-content' : 'dark-content'} backgroundColor={colors.background} /><AccountAccessScreen appearance={themeMode} birthYear={data.birthYear} onBack={() => { setShowTraining(false); go(0); }} onAuthenticated={async (identity) => {
+      const remoteProfile = await supabaseProfileService.get(identity.userId);
+      if (!remoteProfile.ok || remoteProfile.source !== 'remote') {
+        Alert.alert('Could not load your setup', 'Your account is signed in, but we could not load its saved profile. Check your connection and try again.');
+        return;
+      }
+      if (remoteProfile.value) {
+        setData({ ...initialData, ...remoteProfile.value.onboarding });
+        setCompletedAt(remoteProfile.value.completedAt);
+        if (remoteProfile.value.completedAt) setAccount(identity);
+        else { setAccount(identity); setShowTraining(false); go(10); }
+      } else {
+        setAccount(identity);
+        setShowTraining(false);
+        go(0);
+      }
+    }}/></SafeAreaView>;
     return <DailyTrainingLoop
       darkMode={themeMode === 'dark'}
+      appearancePreference={appearancePreference}
+      onAppearanceChange={changeAppearance}
       hasInjury={isInjury}
       selectedArea={formatArea(data.area, data.side)}
       onboarding={{ ...data, completedAt }}
+      fullName={account.fullName ?? ''}
       remindersActive={remindersActive}
       onEditSetup={editSetup}
+      onSignOut={() => { void signOut(); }}
       onToggleWorkoutReminders={() => { void toggleWorkoutReminders(); }}
       onToggleSessionCheckIns={() => update('sessionCheckIns', !data.sessionCheckIns)}
     />;
+  }
+
+  if (screen === 10 && !account) {
+    return <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <StatusBar barStyle={themeMode === 'dark' ? 'light-content' : 'dark-content'} backgroundColor={colors.background} />
+      <AccountAccessScreen appearance={themeMode} birthYear={data.birthYear} onBack={() => go(9)} onAuthenticated={(identity) => { void continueFromAccount(identity); }} />
+    </SafeAreaView>;
   }
 
   return (
@@ -366,13 +547,14 @@ export default function OnboardingScreen() {
         <Animated.View style={[styles.animated, { opacity: fade, transform: [{ translateY: translate }] }]}>
           {screen !== 14 && screen !== 15 ? <View style={styles.progressHeader}>
             <View style={styles.brandLine}><BrandMark styles={styles} /><Text style={styles.brandText}>BENCHLESS</Text></View>
-            <Text style={styles.progressLabel}>{screen === 16 ? '10 / YOUR TRIAL' : progress ? `${String(progress).padStart(2, '0')} / ${sectionLabels[progress]}` : 'WELCOME'}</Text>
+            <Text style={styles.progressLabel}>{progress ? `${String(progress).padStart(2, '0')} / ${sectionLabels[progress]}` : 'WELCOME'}</Text>
             <View accessibilityRole="progressbar" accessibilityLabel="Onboarding progress" accessibilityValue={{ min: 0, max: 10, now: progress }} style={styles.progressTrack}><View style={[styles.progressFill, { width: `${progress === 0 ? 9 : progress * 10}%` }]} /></View>
           </View> : null}
           <ScrollView key={screen} style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             {screen === 0 ? <>
               <Text style={styles.welcomeTitle}>Keep moving.{ '\n' }On your terms.</Text>
               <Text style={styles.welcomeBody}>Adaptive strength training that works around your injury. And with your life.</Text>
+              <AppearancePicker value={appearancePreference} scheme={themeMode} onChange={changeAppearance} />
               <HeroArtwork styles={styles} />
               <View style={styles.welcomePill}><View style={styles.liveDot} /><Text style={styles.welcomePillText}>TRAIN AROUND IT. KEEP MOVING.</Text></View>
               <Text style={styles.welcomeNote}>Built for gym-goers, home exercisers, runners and athletes.</Text>
@@ -441,15 +623,17 @@ export default function OnboardingScreen() {
             </> : null}
 
             {screen === 9 ? <>
-              <View style={styles.birthCard}><Text style={styles.fieldLabel}>YEAR OF BIRTH</Text><View style={styles.yearControl}><Pressable onPress={() => update('birthYear', String(Math.max(1900, Number(data.birthYear) - 1)))} accessibilityLabel="Earlier year" style={styles.yearArrow}><Text style={styles.yearArrowText}>−</Text></Pressable><TextInput value={data.birthYear} onChangeText={(value) => update('birthYear', value.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" maxLength={4} accessibilityLabel="Year of birth" style={styles.yearInput} /><Pressable onPress={() => update('birthYear', String(Math.min(new Date().getFullYear(), Number(data.birthYear) + 1)))} accessibilityLabel="Later year" style={styles.yearArrow}><Text style={styles.yearArrowText}>+</Text></Pressable></View><Text style={styles.smallNote}>Used only to confirm you’re 18 or older.</Text></View>
+              <View style={styles.birthCard}><Text style={styles.fieldLabel}>YEAR OF BIRTH</Text><View style={styles.yearControl}><Pressable disabled={data.birthYear.length !== 4} onPress={() => update('birthYear', String(Math.max(1900, Number(data.birthYear) - 1)))} accessibilityLabel="Earlier year" style={[styles.yearArrow, data.birthYear.length !== 4 && styles.buttonDisabled]}><Text style={styles.yearArrowText}>−</Text></Pressable><TextInput value={data.birthYear} onChangeText={(value) => update('birthYear', value.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" maxLength={4} accessibilityLabel="Year of birth" style={styles.yearInput} /><Pressable disabled={data.birthYear.length !== 4} onPress={() => update('birthYear', String(Math.min(new Date().getFullYear(), Number(data.birthYear) + 1)))} accessibilityLabel="Later year" style={[styles.yearArrow, data.birthYear.length !== 4 && styles.buttonDisabled]}><Text style={styles.yearArrowText}>+</Text></Pressable></View><Text style={styles.smallNote}>Used only to confirm you’re 18 or older.</Text></View>
               <Pressable onPress={() => update('acknowledged', !data.acknowledged)} accessibilityRole="checkbox" accessibilityState={{ checked: data.acknowledged }} style={[styles.disclaimerCard, data.acknowledged && styles.disclaimerSelected]}><View style={[styles.checkMark, data.acknowledged && styles.checkMarkOn]}><Text style={[styles.checkMarkText, data.acknowledged && styles.checkMarkTextOn]}>{data.acknowledged ? '✓' : ''}</Text></View><View style={styles.optionCopy}><Text style={styles.optionTitle}>Coaching, not medical advice.</Text><Text style={styles.optionDetail}>Benchless AI doesn’t diagnose or treat injuries. I’ll follow my clinician’s advice.</Text></View></Pressable>
-              {!isAdult && data.birthYear.length === 4 ? <Text style={styles.validationText}>Benchless AI is for adults 18 and over.</Text> : null}
+              {!isAdult && data.birthYear.length === 4 ? <Text style={styles.validationText}>Benchless AI is for adults 18 and over. You can’t continue to an account or training with this year of birth.</Text> : null}
               {isAdult && !data.acknowledged ? <Text style={styles.smallNote}>Please acknowledge the coaching disclaimer to continue.</Text> : null}
+              {draftSaveError ? <Text accessibilityRole="alert" style={styles.validationText}>{draftSaveError}</Text> : null}
             </> : null}
 
             {screen === 10 ? <>
-              <View style={styles.accountCard}><View style={styles.accountBadge}><Text style={styles.accountBadgeText}>YOUR BENCHLESS PROFILE</Text></View>{[['▦', 'Your plan and preferences'], ['⌁', 'Your training history'], ['✓', 'Your injury preferences']].map(([symbol, label]) => <View key={label} style={styles.accountFeature}><Text style={styles.accountFeatureSymbol}>{symbol}</Text><Text style={styles.accountFeatureText}>{label}</Text></View>)}</View>
-              <View style={styles.calmCard}><Text style={styles.calmTitle}>Start on this device.</Text><Text style={styles.optionDetail}>Your setup is saved here. You can continue without creating an account.</Text></View>
+              <View style={styles.accountCard}><View style={styles.accountBadge}><Text style={styles.accountBadgeText}>ACCOUNT CONNECTED</Text></View><Text style={styles.calmTitle}>{account?.fullName ? `Your account is ready, ${account.fullName.split(/\s+/)[0]}.` : 'Your account is connected.'}</Text>{[['▦', 'Your plan and preferences'], ['⌁', 'Your training history'], ['✓', 'Your injury preferences']].map(([symbol, label]) => <View key={label} style={styles.accountFeature}><Text style={styles.accountFeatureSymbol}>{symbol}</Text><Text style={styles.accountFeatureText}>{label}</Text></View>)}</View>
+              <View style={styles.calmCard}><Text style={styles.calmTitle}>Save your setup.</Text><Text style={styles.optionDetail}>Continue to sync your plan and preferences to your account. Next, choose your reminder preferences.</Text></View>
+              {accountSetupError ? <Text accessibilityRole="alert" style={styles.validationText}>{accountSetupError}</Text> : null}
             </> : null}
 
             {screen === 11 ? <>
@@ -459,9 +643,10 @@ export default function OnboardingScreen() {
             </> : null}
 
             {screen === 12 ? <>
-              <Pressable onPress={() => update('membership', 'Annual')} style={[styles.membershipOption, data.membership === 'Annual' && styles.membershipSelected]}><View style={styles.optionCopy}><Text style={styles.optionTitle}>Annual · $39.99 / year</Text><Text style={styles.optionDetail}>About $3.33 / month when selected after the trial.</Text></View><View style={[styles.radio, data.membership === 'Annual' && styles.radioSelected]}>{data.membership === 'Annual' ? <Text style={styles.radioTick}>✓</Text> : null}</View></Pressable>
-              <Pressable onPress={() => update('membership', 'Monthly')} style={[styles.membershipOption, data.membership === 'Monthly' && styles.membershipSelected]}><View style={styles.optionCopy}><Text style={styles.optionTitle}>Monthly · $7.99 / month</Text><Text style={styles.optionDetail}>Choose this after your free trial if you want to continue.</Text></View><View style={[styles.radio, data.membership === 'Monthly' && styles.radioSelected]}>{data.membership === 'Monthly' ? <Text style={styles.radioTick}>✓</Text> : null}</View></Pressable>
-              <View style={styles.timeline}>{[['01', 'Today', 'Full access. Nothing charged.'], ['02', 'Day 12', 'We’ll remind you before your trial ends.'], ['03', 'Day 14', 'Choose a plan to keep training.']].map(([number, title, detail]) => <View key={number} style={styles.timelineRow}><Text style={styles.timelineNumber}>{number}</Text><View style={styles.optionCopy}><Text style={styles.optionTitle}>{title}</Text><Text style={styles.optionDetail}>{detail}</Text></View></View>)}</View>
+              <View style={styles.membershipOption}><View style={styles.optionCopy}><Text style={styles.optionTitle}>14 days · No card required</Text><Text style={styles.optionDetail}>The trial offer is shown here. This build does not start a trial or collect payment details.</Text></View><View style={[styles.adaptedBadge]}><Text style={styles.adaptedText}>PREVIEW</Text></View></View>
+              <Pressable onPress={() => update('membership', 'Annual')} style={[styles.membershipOption, data.membership === 'Annual' && styles.membershipSelected]}><View style={styles.optionCopy}><Text style={styles.optionTitle}>After the trial · Annual</Text><Text style={styles.optionDetail}>Price and billing will be confirmed when subscriptions are connected.</Text></View><View style={[styles.radio, data.membership === 'Annual' && styles.radioSelected]}>{data.membership === 'Annual' ? <Text style={styles.radioTick}>✓</Text> : null}</View></Pressable>
+              <Pressable onPress={() => update('membership', 'Monthly')} style={[styles.membershipOption, data.membership === 'Monthly' && styles.membershipSelected]}><View style={styles.optionCopy}><Text style={styles.optionTitle}>After the trial · Monthly</Text><Text style={styles.optionDetail}>Choose monthly billing when subscriptions become available.</Text></View><View style={[styles.radio, data.membership === 'Monthly' && styles.radioSelected]}>{data.membership === 'Monthly' ? <Text style={styles.radioTick}>✓</Text> : null}</View></Pressable>
+              <View style={styles.timeline}>{[['01', 'Review your plan', 'See how onboarding shapes your first week.'], ['02', 'Create or sign in', 'Keep your setup attached to your account.'], ['03', 'Trial activation', 'A live trial starts only when account and billing services support it.']].map(([number, title, detail]) => <View key={number} style={styles.timelineRow}><Text style={styles.timelineNumber}>{number}</Text><View style={styles.optionCopy}><Text style={styles.optionTitle}>{title}</Text><Text style={styles.optionDetail}>{detail}</Text></View></View>)}</View>
             </> : null}
 
             {screen === 13 ? <>
@@ -475,14 +660,9 @@ export default function OnboardingScreen() {
               <View style={styles.successMark}><Text style={styles.successCheck}>✓</Text></View>
               <Text style={styles.eyebrow}>YOUR FIRST STEP IS SET</Text>
               <Text style={styles.title}>You’re ready to move.</Text>
-              <Text style={styles.body}>Your starting preferences are saved on this device. You can review them any time from your profile.</Text>
+              <Text style={styles.body}>Your starting preferences are saved with your account.</Text>
               <View style={styles.summaryCard}><Text style={styles.fieldLabel}>YOUR STARTING POINT</Text><Text style={styles.summaryLine}>{data.goal} · {data.experience}</Text><Text style={styles.summaryLine}>{data.equipment.join(', ') || 'No equipment selected'}</Text><Text style={styles.summaryLine}>{data.days.length} training {data.days.length === 1 ? 'day' : 'days'} per week</Text>{isInjury ? <Text style={styles.summaryLine}>Check-in: {formatArea(data.area, data.side)} · pain {data.pain}/5</Text> : <Text style={styles.summaryLine}>No current injury selected</Text>}</View>
               <View style={styles.calmCard}><Text style={styles.calmTitle}>Coaching, not medical advice.</Text><Text style={styles.optionDetail}>Benchless AI does not diagnose or treat injuries. Follow guidance from your clinician.</Text></View>
-            </> : null}
-
-            {screen === 16 ? <>
-              <View style={styles.timeline}>{[['01', 'Today', 'Your 14-day preview begins. No payment details needed.'], ['02', 'Day 12', 'We’ll remind you before your preview ends.'], ['03', 'Day 14', `Choose a plan if you want to keep training: ${data.membership === 'Annual' ? '$39.99 / year' : '$7.99 / month'}.`]].map(([number, title, detail]) => <View key={number} style={styles.timelineRow}><Text style={styles.timelineNumber}>{number}</Text><View style={styles.optionCopy}><Text style={styles.optionTitle}>{title}</Text><Text style={styles.optionDetail}>{detail}</Text></View></View>)}</View>
-              <View style={styles.calmCard}><Text style={styles.calmTitle}>No payment details needed.</Text><Text style={styles.optionDetail}>You can decide later whether to subscribe.</Text></View>
             </> : null}
 
             {screen === 15 ? <>
@@ -492,19 +672,18 @@ export default function OnboardingScreen() {
         </Animated.View>
 
         <View style={styles.footer}>
-          {screen === 0 ? <><FooterButton label="Get started" onPress={next} /><Text style={styles.footerNote}>About 2 minutes to build your starting plan.</Text></> : null}
-          {screen > 0 && screen < 14 ? <><FooterButton label={screen === 6 ? 'Confirm area' : screen === 8 && hasRedFlag ? 'See safety guidance' : screen === 10 ? 'Continue on this device' : screen === 11 ? 'Looks good' : screen === 12 ? 'Continue' : screen === 13 ? data.workoutReminders ? 'Enable reminders' : 'Continue' : 'Continue'} onPress={screen === 13 ? () => { void saveReminderPreferences(); } : next} disabled={(screen === 4 && data.days.length === 0) || (screen === 9 && (!isAdult || !data.acknowledged))} />
+          {screen === 0 ? <><FooterButton label="Get started" onPress={next} /><FooterButton label="I already have an account" secondary onPress={() => setShowTraining(true)} /><Text style={styles.footerNote}>About 2 minutes to build your starting plan.</Text></> : null}
+          {screen > 0 && screen < 15 ? <><FooterButton label={screen === 10 && savingAccountSetup ? 'Saving your setup…' : screen === 6 ? 'Confirm area' : screen === 8 && hasRedFlag ? 'See safety guidance' : screen === 11 ? 'Looks good' : screen === 13 ? data.workoutReminders ? 'Enable reminders' : 'Continue' : screen === 14 ? 'Start training' : 'Continue'} onPress={screen === 13 ? () => { void saveReminderPreferences(); } : screen === 14 ? () => { void openToday(); } : next} disabled={savingAccountSetup || (screen === 4 && data.days.length === 0) || (screen === 9 && (!isAdult || !data.acknowledged))} />
             {screen === 2 ? <Text style={styles.footerNote}>Not sure? Start a little lighter.</Text> : null}
             {screen === 4 ? <Text style={styles.footerNote}>Recovery days are built in.</Text> : null}
             {screen === 5 ? <Text style={styles.footerNote}>Your health information stays private.</Text> : null}
             {screen === 6 ? <Text style={styles.footerNote}>You can change this selection later.</Text> : null}
             {screen === 9 ? <Text style={styles.footerNote}>You’re in control of what you share.</Text> : null}
             {screen === 11 ? <Text style={styles.footerNote}>Plan adapts to your session check-ins.</Text> : null}
-            {screen === 12 ? <><Text style={styles.footerNote}>After 14 days, choose whether to continue at {data.membership === 'Annual' ? '$39.99 per year' : '$7.99 per month'}. This prototype does not take payments.</Text><View style={styles.legalLinks}><Pressable onPress={() => Alert.alert('Purchases', 'No purchases are associated with this device.')}><Text style={styles.linkText}>Restore purchases</Text></Pressable><Text style={styles.linkDot}>·</Text><Pressable onPress={() => Alert.alert('Terms', 'Benchless AI provides strength-training coaching, not medical diagnosis or treatment. Stop training and seek qualified advice if you have new, severe or worsening symptoms.')}><Text style={styles.linkText}>Terms</Text></Pressable><Text style={styles.linkDot}>·</Text><Pressable onPress={() => Alert.alert('Privacy', 'Your onboarding choices are saved on this device. Do not enter detailed medical information in optional notes.')}><Text style={styles.linkText}>Privacy</Text></Pressable></View></> : null}
-            {screen === 13 ? <><Text style={styles.footerNote}>{remindersActive ? 'Workout reminders are scheduled for your selected days.' : 'You can change these preferences later.'}</Text><Pressable onPress={() => { void syncWorkoutReminders(false, data.days, data.trainingTime).catch(() => undefined); setRemindersActive(false); update('workoutReminders', false); go(16); }} style={styles.notNow}><Text style={styles.linkText}>Not now</Text></Pressable></> : null}
+            {screen === 12 ? <><Text style={styles.footerNote}>After 14 days, choose whether to continue at {data.membership === 'Annual' ? '$39.99 per year' : '$7.99 per month'}. This preview does not start a trial or take payment.</Text><View style={styles.legalLinks}><Pressable onPress={() => Alert.alert('Purchases', 'Purchases are not connected in this build.')}><Text style={styles.linkText}>Restore purchases</Text></Pressable><Text style={styles.linkDot}>·</Text><Pressable onPress={() => Alert.alert('Terms', 'Benchless AI provides strength-training coaching, not medical diagnosis or treatment. Stop training and seek qualified advice if you have new, severe or worsening symptoms.')}><Text style={styles.linkText}>Terms</Text></Pressable><Text style={styles.linkDot}>·</Text><Pressable onPress={() => Alert.alert('Privacy', 'Your onboarding choices are saved on this device. Do not enter detailed medical information in optional notes.')}><Text style={styles.linkText}>Privacy</Text></Pressable></View></> : null}
+            {screen === 13 ? <><Text style={styles.footerNote}>{remindersActive ? 'Workout reminders are scheduled for your selected days.' : 'You can change these preferences later.'}</Text><Pressable onPress={() => { void syncWorkoutReminders(false, data.days, data.trainingTime).catch(() => undefined); setRemindersActive(false); update('workoutReminders', false); go(14); }} style={styles.notNow}><Text style={styles.linkText}>Not now</Text></Pressable></> : null}
           </> : null}
-          {screen === 16 ? <><FooterButton label="Start my 14 days" onPress={() => go(14)} /><Text style={styles.footerNote}>Your history and safety tools stay yours, even if you don’t subscribe.</Text></> : null}
-          {screen === 14 ? <><FooterButton label="Open Today" onPress={openToday} /><Text style={styles.footerNote}>Your plan can adapt to your session check-ins.</Text></> : null}
+          {screen === 14 ? <Text style={styles.footerNote}>Membership is not connected in this build. No trial or payment has started.</Text> : null}
           {screen === 15 ? <><FooterButton label="Review my answers" onPress={() => go(8)} /><Pressable onPress={() => go(0)} style={styles.notNow}><Text style={styles.linkText}>Close for now</Text></Pressable><Pressable onPress={() => { const cleared = [...data.redFlags]; cleared.fill(false); update('redFlags', cleared); go(8); }} style={styles.notNow}><Text style={styles.linkText}>I answered by mistake</Text></Pressable></> : null}
         </View>
       </KeyboardAvoidingView>

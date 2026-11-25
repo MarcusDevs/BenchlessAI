@@ -6,6 +6,7 @@ Implement the searchable exercise library and filters from the frontend FRD.
 
 - Search and filter by category, muscle, equipment, and user safety context; show available, modified/safe-now, and phase-locked states with understandable labels.
 - Use the real exercise catalogue and safety rules when configured. Do not advertise a catalogue count that is not present or claim safety from a placeholder filter.
+- Load a versioned catalogue/rules bundle through the approved service boundary and retain its version with decisions. Catalogue availability never overrides red-flag stops or injury rules.
 - Link exercise rows to the same detail and swap flows used by workouts. Keep filter selections understandable and resettable.
 - Include useful empty, loading, offline, and error states.
 

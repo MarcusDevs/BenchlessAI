@@ -13,7 +13,7 @@
 - Deterministic rules and reviewed content decide whether an exercise or plan is safe. AI may explain a decision but must never choose a safe exercise, change a phase, or bypass a red-flag stop.
 - Benchless AI offers strength-training coaching, not diagnosis, treatment, or rehabilitation prescriptions. Preserve clinician guidance and stop states for positive red flags.
 - Never invent persisted records or present sample values as a user's health data. Mark local preview data as sample, or derive displays from actual app state.
-- Keep guest onboarding state through sign-up/account linking. Do not lose or silently overwrite a person's plan or logs during authentication transitions.
+- Keep the local onboarding draft through sign-up/sign-in and attach it to the confirmed profile. Do not unlock training tabs before the auth service confirms a remote session; never present local persistence as an account session.
 - Keep secrets and privileged service credentials out of the mobile bundle. Use typed service contracts and environment-safe public configuration.
 - Respect adults-only access, privacy choices, consent, account deletion, and free safety/history access after entitlement expiry.
 

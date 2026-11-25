@@ -7,6 +7,7 @@ Implement post-workout feel/pain check-in and phase outcomes.
 - Capture feel (Perfect, A bit much, Too much, Too easy) and pain from 0–5. Ask which exercise only after “Too much”.
 - Recheck red flags where required. Any positive danger signal must stop training and show clinician guidance.
 - Show whether the phase holds, advances, or steps back with the actual approved rule inputs and a plain explanation. The client must not invent phase thresholds; if approval is missing, show a pending/undetermined state instead of advancing.
+- Store check-ins against the authenticated user and workout, preserve the rules/content version used for an outcome, and queue offline saves visibly. A new positive red flag takes precedence over progression and prevents another injury workout.
 - Offer a clear path from result to the next planned workout and let people review/correct their check-in before saving.
 
 ## Acceptance
